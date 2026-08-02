@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>HashFS - Bootloader</title>
+	<style>
+		/* Estética Brutalista / Terminal Antigo */
+		body {
+			background: #050505;
+			color: #00ff00;
+			font-family: 'Courier New', Courier, monospace;
+			margin: 0;
+			padding: 20px;
+			overflow: hidden;
+		}
+
+		pre {
+			color: #00ff00;
+			text-shadow: 0 0 5px #00aa00;
+			font-size: 14px;
+			margin-bottom: 30px;
+		}
+
+		.linha {
+			margin-bottom: 10px;
+			font-size: 16px;
+			line-height: 1.5;
+		}
+
+		.alerta {
+			color: #ffff00;
+		}
+
+		#input-container {
+			display: none;
+			margin-top: 20px;
+		}
+
+		#prompt {
+			font-weight: bold;
+		}
+
+		input {
+			background: transparent;
+			color: #00ff00;
+			border: none;
+			outline: none;
+			font-family: inherit;
+			font-size: 16px;
+			width: 70%;
+		}
+
+		.cursor {
+			animation: blink 1s step-end infinite;
+			font-weight: bold;
+		}
+
+		@keyframes blink {
+			50% {
+				opacity: 0;
+			}
+		}
+	</style>
+</head>
+
+<body>
+	<pre>
+		_ _ _ _____ ____
+		| | | | __ _ ___| |__ | ___/ ___|
+		| |_| |/ _` / __| '_ \ | |_ \___ \
+		| _ | (_| \__ \ | | || _| ___) |
+		|_| |_|\__,_|___/_| |_||_| |____/
+		====================================
+		v1.0 - ZERO-BYTE HOSTING SYSTEM
+		====================================
+	</pre>
+
+	<div id="console-output"></div>
+
+	<div id="input-container">
+		<span id="prompt">> COLE O PAYLOAD: </span>
+		<input type="text" id="disco-input" autocomplete="off" spellcheck="false" autofocus />
+		<span class="cursor">_</span>
+	</div>
+
+	<script src="wasm_exec.js"></script>
+
+	<script>
+		let discos = [];
+		let totalDiscos = 0;
+
+		const terminal = document.getElementById('console-output');
+		const inputContainer = document.getElementById('input-container');
+		const inputCampo = document.getElementById('disco-input');
+		const prompt = document.getElementById('prompt');
+
+		function printLog(msg, cssClass = "") {
+			const div = document.createElement('div');
+			div.className = `linha ${cssClass}`;
+			div.innerText = msg;
+			terminal.appendChild(div);
+		}
+
+		async function bootWasm() {
+			printLog("> INICIALIZANDO KERNEL WASM...");
+			try {
+				const go = new Go();
+				const result = await WebAssembly.instantiateStreaming(
+					fetch("wasm.wasm?v=" + Date.now()), go.importObject
+				);
+				go.run(result.instance);
+				printLog("> KERNEL CARREGADO COM SUCESSO.");
+				return true;
+			} catch (err) {
+				printLog("> ERRO FATAL AO CARREGAR WASM: " + err, "alerta");
+				return false;
+			}
+		}
+
+		// --- DETECTA O RAID 0 (DISQUETES) ---
+		function processarHash(hashStr) {
+			if (hashStr.startsWith('#')) hashStr = hashStr.substring(1);
+			if (!hashStr) return;
+
+			// Regex exata para o formato gerado pelo Go: v1;[1/2]
+			const regex = /^v1;\[(\d+)\/(\d+)\](.*)/;
+			const match = hashStr.match(regex);
+
+			if (match) {
+				const parteAtual = parseInt(match[1]);
+				totalDiscos = parseInt(match[2]);
+				const payloadBruto = match[3];
+
+				// Prepara o array se for o primeiro disco inserido
+				if (discos.length !== totalDiscos) {
+					discos = new Array(totalDiscos).fill(null);
+				}
+
+				discos[parteAtual - 1] = payloadBruto;
+				printLog(`> LIDO SETOR [${parteAtual}/${totalDiscos}] (${payloadBruto.length} BYTES)`);
+			} else {
+				// Se não tem a assinatura v1;[...], significa que o Go não fatiou o arquivo (menor que 1.8MB)
+				discos = [hashStr];
+				totalDiscos = 1;
+				printLog("> VOLUME ÚNICO DETECTADO.");
+			}
+
+			verificarProgresso();
+		}
+
+		function verificarProgresso() {
+			let discoFaltando = -1;
+			for (let i = 0; i < totalDiscos; i++) {
+				if (!discos[i]) {
+					discoFaltando = i + 1;
+					break;
+				}
+			}
+
+			if (discoFaltando !== -1) {
+				inputContainer.style.display = 'block';
+				prompt.innerText = `> INSIRA O DISCO ${discoFaltando}: `;
+				inputCampo.focus();
+			} else {
+				inputContainer.style.display = 'none';
+				printLog("> TODOS OS DISCOS INSERIDOS. PREPARANDO INJEÇÃO...", "alerta");
+
+				// Junta tudo em uma mega string Base64 e manda pro kernel Go
+				const payloadCompleto = discos.join('');
+				executarPayload(payloadCompleto);
+			}
+		}
+
+		// --- EXECUÇÃO (XSS) ---
+		function executarPayload(payloadString) {
+			printLog(`> DESCOMPRIMINDO MATRIZ DE DADOS...`);
+			setTimeout(() => {
+				try {
+					const htmlPuro = window.decoder(payloadString);
+					if (htmlPuro.includes("Erro") || htmlPuro.includes("Error")) {
+						printLog("> PANIC: " + htmlPuro, "alerta");
+						return;
+					}
+
+					printLog("> DESCOMPRESSÃO CONCLUÍDA. INJETANDO NO DOM...");
+					setTimeout(() => {
+						const iframe = document.createElement('iframe');
+						iframe.style.cssText = "position:absolute; top:0; left:0; width:100vw; height:100vh; border:none; z-index:9999; background: white;";
+						iframe.srcdoc = htmlPuro;
+						document.body.innerHTML = '';
+						document.body.appendChild(iframe);
+					}, 500);
+				} catch (e) {
+					printLog("> PANIC: FALHA INTERNA NO KERNEL: " + e, "alerta");
+				}
+			}, 800);
+		}
+
+		// EVENTO DE DIGITAÇÃO NO TERMINAL FALSO
+		inputCampo.addEventListener('keypress', function (e) {
+			if (e.key === 'Enter') {
+				const linkColado = inputCampo.value.trim();
+				inputCampo.value = '';
+				processarHash(linkColado);
+			}
+		});
+
+		// BOOT INICIAL
+		window.onload = async () => {
+			const kernelPronto = await bootWasm();
+			if (kernelPronto) {
+				const hashAtual = window.location.hash;
+				if (hashAtual.length > 1) {
+					// Já entrou com link
+					processarHash(hashAtual);
+				} else {
+					// Link limpo, espera o usuário colar
+					inputContainer.style.display = 'block';
+					prompt.innerText = `> INSIRA O DISCO 1: `;
+					inputCampo.focus();
+				}
+			}
+		};
+	</script>
+</body>
+
+</html>
